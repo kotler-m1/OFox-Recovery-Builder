@@ -1,88 +1,68 @@
-name: OrangeFox 16 Builder
+name: OrangeFox - Build
 
 on:
   workflow_dispatch:
     inputs:
-      FOX_BRANCH:
-        description: 'OrangeFox Sync Branch'
+      MANIFEST_BRANCH:
+        description: 'OrangeFox Manifest Branch'
         required: true
         default: '16.0'
         type: choice
         options:
         - '16.0'
         - '14.1'
+        - '12.1'
       DEVICE_TREE:
-        description: 'Custom Recovery Tree URL'
+        description: 'OrangeFox Device Tree'
         required: true
         default: ''
       DEVICE_TREE_BRANCH:
-        description: 'Custom Recovery Tree Branch'
+        description: 'OrangeFox Device Tree Branch'
         required: true
         default: ''
       DEVICE_PATH:
-        description: 'Device Path (e.g. device/vendor/codename)'
+        description: 'Specify your Device Path'
         required: true
         default: ''
       DEVICE_NAME:
-        description: 'Device Codename'
+        description: 'Specify your Device Codename'
         required: true
         default: ''
       BUILD_TARGET:
-        description: 'Build Target'
+        description: 'Specify your Build Target'
         required: true
         default: 'vendorboot'
         type: choice
         options:
         - vendorboot
         - recovery
-      LDCHECK:
-        description: 'Path of blobs to check (blank to skip)'
-        required: false
-        default: ''
-      CUSTOM_MAKEFILE_URL:
-        description: 'Optional: raw URL of a custom Makefile (leave blank for stock)'
-        required: false
-        default: ''
+        - boot
 
 jobs:
   build:
-    name: Build OrangeFox by ${{ github.actor }}
+    name: Build OFR by ${{ github.actor }}
     runs-on: ubuntu-22.04
-    if: github.event.repository.owner.id == github.event.sender.id
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      FOX_SYNC_URL: https://gitlab.com/OrangeFox/sync.git
     permissions:
       contents: write
     steps:
-    - name: Check Out
-      uses: actions/checkout@v3
+    - name: Checkout
+      uses: actions/checkout@v4
 
     - name: Validate Inputs
       run: |
         fail=0
-        [ -z "${{ github.event.inputs.DEVICE_TREE }}" ]        && { echo "::error::DEVICE_TREE is required."; fail=1; }
-        [ -z "${{ github.event.inputs.DEVICE_TREE_BRANCH }}" ] && { echo "::error::DEVICE_TREE_BRANCH is required."; fail=1; }
-        [ -z "${{ github.event.inputs.DEVICE_PATH }}" ]        && { echo "::error::DEVICE_PATH is required."; fail=1; }
-        [ -z "${{ github.event.inputs.DEVICE_NAME }}" ]        && { echo "::error::DEVICE_NAME is required."; fail=1; }
+        [ -z "${{ inputs.DEVICE_TREE }}" ]        && { echo "::error::DEVICE_TREE is required."; fail=1; }
+        [ -z "${{ inputs.DEVICE_TREE_BRANCH }}" ] && { echo "::error::DEVICE_TREE_BRANCH is required."; fail=1; }
+        [ -z "${{ inputs.DEVICE_PATH }}" ]        && { echo "::error::DEVICE_PATH is required."; fail=1; }
+        [ -z "${{ inputs.DEVICE_NAME }}" ]        && { echo "::error::DEVICE_NAME is required."; fail=1; }
         if [ "$fail" -ne 0 ]; then exit 1; fi
-        echo "All required inputs are set."
 
-    - name: Display Inputs
-      run: |
-        echo "::group::User Environment Variables"
-        echo "OrangeFox Sync Branch: ${{ github.event.inputs.FOX_BRANCH }}"
-        echo "Device Tree:           ${{ github.event.inputs.DEVICE_TREE }}"
-        echo "Device Branch:         ${{ github.event.inputs.DEVICE_TREE_BRANCH }}"
-        echo "Device Path:           ${{ github.event.inputs.DEVICE_PATH }}"
-        echo "Device Name:           ${{ github.event.inputs.DEVICE_NAME }}"
-        echo "Build Target:          ${{ github.event.inputs.BUILD_TARGET }}image"
-        echo "::endgroup::"
-
-    - name: Cleanup
+    - name: Clean-up
       uses: rokibhasansagar/slimhub_actions@main
 
-    - name: Set Swap Space
+    - name: Swap Space
       uses: pierotofy/set-swap-space@master
       with:
         swap-size-gb: 24
@@ -92,133 +72,98 @@ jobs:
         sudo sysctl vm.swappiness=120
         echo "vm.swappiness is now: $(cat /proc/sys/vm/swappiness)"
 
-    - name: Prepare the environment (Dependencies)
-      run: |
-        sudo apt update
-        sudo apt -y upgrade
-        sudo apt -y install gperf gcc-multilib gcc-10-multilib g++-multilib g++-10-multilib lib32ncurses5-dev x11proto-core-dev lib32z-dev libgl1-mesa-dev libxml2-utils xsltproc bc ccache lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libwxgtk3.0-gtk3-dev lzop pngcrush schedtool squashfs-tools imagemagick libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev libtinfo5 libgflags-dev
-        sudo add-apt-repository universe
-        sudo apt -y install libncurses5
-
-    - name: Install OpenJDK 21
+    # --- JDK selection: 21 for 16.0, 17 for 14.1/12.1 ---
+    - name: Install JDK 21 (fox_16.0)
+      if: inputs.MANIFEST_BRANCH == '16.0'
       uses: actions/setup-java@v4
       with:
         distribution: zulu
         java-version: 21
 
-    - name: Verify Java version
+    - name: Install JDK 17 (fox_14.1 / fox_12.1)
+      if: inputs.MANIFEST_BRANCH != '16.0'
+      uses: actions/setup-java@v4
+      with:
+        distribution: zulu
+        java-version: 17
+
+    - name: Verify Java
       run: |
         java -version
         echo "JAVA_HOME=$JAVA_HOME"
 
-    # --- ORANGEFOX SYNC (fox_16.0) ---
-    - name: Clone OrangeFox Sync Script
+    # --- This is what installs `repo` and all build deps ---
+    - name: Build Environment
       run: |
-        mkdir -p ~/OrangeFox_sync
-        cd ~/OrangeFox_sync
-        git clone ${{ env.FOX_SYNC_URL }} sync
+        sudo apt install aria2 -y
+        git clone https://gitlab.com/OrangeFox/misc/scripts.git -b master
+        cd scripts
+        sudo bash setup/android_build_env.sh
+
+    - name: Set-up Manifest
+      run: |
+        mkdir -p ${GITHUB_WORKSPACE}/OrangeFox
+        cd ${GITHUB_WORKSPACE}/OrangeFox
+        git config --global user.name "${{ github.actor }}"
+        git config --global user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+        git clone https://gitlab.com/OrangeFox/sync.git -b master
         cd sync
-        chmod +x orangefox_sync.sh
-
-    - name: Sync OrangeFox Sources (fox_16.0)
-      run: |
-        cd ~/OrangeFox_sync/sync
-        ./orangefox_sync.sh --branch ${{ github.event.inputs.FOX_BRANCH }} --path ~/fox_source
-        echo "Sync completed. Source tree is at ~/fox_source"
-
-    - name: Apply Custom Makefile (optional)
-      if: github.event.inputs.CUSTOM_MAKEFILE_URL != ''
-      run: |
-        cd ~/fox_source
-        wget -q -O build/make/core/Makefile "${{ github.event.inputs.CUSTOM_MAKEFILE_URL }}"
-        if [ ! -s build/make/core/Makefile ]; then
-          echo "::error::Custom Makefile download failed or is empty."
-          exit 1
-        fi
-        head -n 5 build/make/core/Makefile
-        sha256sum build/make/core/Makefile
+        ./orangefox_sync.sh --branch ${{ inputs.MANIFEST_BRANCH }} --path ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}
 
     - name: Clone Device Tree
       run: |
-        cd ~/fox_source
-        git clone ${{ github.event.inputs.DEVICE_TREE }} \
-          -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} \
-          ./${{ github.event.inputs.DEVICE_PATH }}
-        cd ${{ github.event.inputs.DEVICE_PATH }}
+        cd ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}
+        git clone ${{ inputs.DEVICE_TREE }} -b ${{ inputs.DEVICE_TREE_BRANCH }} ./${{ inputs.DEVICE_PATH }}
+        cd ${{ inputs.DEVICE_PATH }}
         echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
 
-    - name: Check Build Makefile
+    - name: Building OrangeFox
       run: |
-        cd ~/fox_source
-        if [ -f ${{ github.event.inputs.DEVICE_PATH }}/twrp_${{ github.event.inputs.DEVICE_NAME }}.mk ]; then
-          echo "DEVICE_MAKEFILE=twrp_${{ github.event.inputs.DEVICE_NAME }}" >> $GITHUB_ENV
-        elif [ -f ${{ github.event.inputs.DEVICE_PATH }}/omni_${{ github.event.inputs.DEVICE_NAME }}.mk ]; then
-          echo "DEVICE_MAKEFILE=omni_${{ github.event.inputs.DEVICE_NAME }}" >> $GITHUB_ENV
-        else
-          echo "::error::No recovery makefile found!"
-          exit 1
-        fi
-      continue-on-error: false
-
-       # --- BUILD WITH ORANGEFOX (fox_16.0) ---
-    - name: Building OrangeFox Image
-      run: |
-        cd ~/fox_source
+        cd ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}
+        set +e
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
-        export FOX_BUILD_DEVICE=${{ github.event.inputs.DEVICE_NAME }}
+        export FOX_BUILD_DEVICE=${{ inputs.DEVICE_NAME }}
         export LC_ALL=C
-        
-        # Correct lunch command for Android 16 / fox_16.0
-        lunch twrp_${{ github.event.inputs.DEVICE_NAME }}-bp2a-eng
-        
-        mka adbd ${{ github.event.inputs.BUILD_TARGET }}image -j$(nproc --all)
-        echo "Done building OrangeFox ${{ github.event.inputs.BUILD_TARGET }}.img"
+        set -e
 
-    - name: Set Build Date & Device Tree URL
+        # Branch-specific lunch target
+        if [ "${{ inputs.MANIFEST_BRANCH }}" = "16.0" ]; then
+          LUNCH_TARGET="twrp_${{ inputs.DEVICE_NAME }}-bp2a-eng"
+        elif [ "${{ inputs.MANIFEST_BRANCH }}" = "14.1" ]; then
+          LUNCH_TARGET="twrp_${{ inputs.DEVICE_NAME }}-ap2a-eng"
+        else
+          # 12.1 and older use the plain "-eng" target
+          LUNCH_TARGET="twrp_${{ inputs.DEVICE_NAME }}-eng"
+        fi
+
+        echo "Using lunch target: $LUNCH_TARGET"
+        lunch $LUNCH_TARGET
+        make clean
+        mka adbd ${{ inputs.BUILD_TARGET }}image -j$(nproc --all)
+
+    - name: Set Release Properties
       run: |
-        echo "BUILD_DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
-        DEVICE_TREE_URL="${{ github.event.inputs.DEVICE_TREE }}"
+        echo "BUILD_DATE=$(TZ=Asia/Manila date +%Y%m%d)" >> $GITHUB_ENV
+        cd ${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}
+
+        DEVICE_TREE_URL="${{ inputs.DEVICE_TREE }}"
         if [[ "${DEVICE_TREE_URL}" == *.git ]]; then
           DEVICE_TREE_URL="${DEVICE_TREE_URL%.git}"
         fi
         echo "DEVICE_TREE_URL=${DEVICE_TREE_URL}" >> $GITHUB_ENV
 
-    - name: Locate OrangeFox Output Image
-      run: |
-        cd ~/fox_source
-        TARGET_IMG="out/target/product/${{ github.event.inputs.DEVICE_NAME }}/OrangeFox-unofficial-${{ github.event.inputs.DEVICE_NAME }}.img"
-        if [ -f "${TARGET_IMG}" ]; then
-          echo "RECOVERY_TYPE=$(basename "${TARGET_IMG}" .img)" >> $GITHUB_ENV
-          echo "MD5_IMG=$(md5sum "${TARGET_IMG}" | cut -d ' ' -f 1)" >> $GITHUB_ENV
-          echo "Found: ${TARGET_IMG}"
-        else
-          echo "::error::No OrangeFox image found at ${TARGET_IMG}"
-          ls -la out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*.img || true
-          exit 1
-        fi
-
     - name: Upload to Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         files: |
-          ~/fox_source/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ env.RECOVERY_TYPE }}.img
-        name: OrangeFox 16 for ${{ github.event.inputs.DEVICE_NAME }} // ${{ env.BUILD_DATE }}
+          OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}/out/target/product/${{ inputs.DEVICE_NAME }}/OrangeFox*.img
+          OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}/out/target/product/${{ inputs.DEVICE_NAME }}/OrangeFox*.zip
+        name: OrangeFox ${{ inputs.MANIFEST_BRANCH }} for ${{ inputs.DEVICE_NAME }} // ${{ env.BUILD_DATE }}
         tag_name: ${{ github.run_id }}
         body: |
-          OrangeFox Sync Branch: ${{ github.event.inputs.FOX_BRANCH }}
-          Target: ${{ github.event.inputs.BUILD_TARGET }}.img
-          Device: [Device Tree/Branch](${{ env.DEVICE_TREE_URL }}/tree/${{ github.event.inputs.DEVICE_TREE_BRANCH }})
+          ## OrangeFox Recovery Build - Unofficial
+          Build: fox_${{ inputs.MANIFEST_BRANCH }}
+          Target: ${{ inputs.BUILD_TARGET }}.img
+          Device: [Device Tree/Branch](${{ env.DEVICE_TREE_URL }}/tree/${{ inputs.DEVICE_TREE_BRANCH }})
           Commit: Most recent [commit](${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}) during building.
-          MD5 (img): ${{ env.MD5_IMG }}
-
-    - name: Checking For Missing Dependencies
-      if: github.event.inputs.LDCHECK != ''
-      run: |
-        cd tools
-        mv -n libneeds ~/fox_source/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/recovery/root/ 2>/dev/null || true
-        mv -n ldcheck ~/fox_source/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/recovery/root/ 2>/dev/null || true
-        cd ~/fox_source/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/recovery/root
-        python3 ldcheck -p system/lib64:vendor/lib64:system/lib:vendor/lib -d ${{ github.event.inputs.LDCHECK }}
-        echo "Done checking missing dependencies."
-      continue-on-error: true
