@@ -100,11 +100,11 @@ jobs:
     - name: Swap Space
       uses: pierotofy/set-swap-space@master
       with:
-        swap-size-gb: 24
+        swap-size-gb: 16
 
     - name: Increase vm.swappiness
       run: |
-        sudo sysctl vm.swappiness=120
+        sudo sysctl vm.swappiness=150
         echo "vm.swappiness is now: $(cat /proc/sys/vm/swappiness)"
 
     # --- JDK selection: 21 for 16.0, 17 for older branches ---
@@ -149,7 +149,7 @@ jobs:
         df -h /
         echo "::endgroup::"
 
-        # Shallow clone — depth=1 saves ~40-60 GB compared to full history
+        # Shallow clone
         repo init -u https://gitlab.com/OrangeFox/Manifest.git -b "fox_${FOX_BRANCH}" --depth=1
 
         # -c = only current branch; --no-clone-bundle/--no-tags save extra space
