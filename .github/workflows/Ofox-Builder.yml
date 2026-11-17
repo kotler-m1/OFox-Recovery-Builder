@@ -100,11 +100,11 @@ jobs:
     - name: Swap Space
       uses: pierotofy/set-swap-space@master
       with:
-        swap-size-gb: 16
+        swap-size-gb: 24
 
     - name: Increase vm.swappiness
       run: |
-        sudo sysctl vm.swappiness=150
+        sudo sysctl vm.swappiness=80
         echo "vm.swappiness is now: $(cat /proc/sys/vm/swappiness)"
 
     # --- JDK selection: 21 for 16.0, 17 for older branches ---
