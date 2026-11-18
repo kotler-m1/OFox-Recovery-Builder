@@ -1,0 +1,350 @@
+name: OrangeFox - Build VERIFY
+
+on:
+  workflow_dispatch:
+    inputs:
+      MANIFEST_BRANCH:
+        description: 'OrangeFox Manifest Branch'
+        required: true
+        default: '16.0'
+        type: choice
+        options:
+        - '16.0'
+        - '14.1'
+        - '12.1'
+      DEVICE_TREE:
+        description: 'OrangeFox Device Tree URL'
+        required: true
+        default: ''
+      DEVICE_TREE_BRANCH:
+        description: 'OrangeFox Device Tree Branch'
+        required: true
+        default: ''
+      DEVICE_PATH:
+        description: 'Specify your Device Path (e.g. device/vendor/codename)'
+        required: true
+        default: ''
+      DEVICE_NAME:
+        description: 'Specify your Device Codename'
+        required: true
+        default: ''
+      BUILD_TARGET:
+        description: 'Specify your Build Target'
+        required: true
+        default: 'vendorboot'
+        type: choice
+        options:
+        - vendorboot
+        - recovery
+        - boot
+      CUSTOM_MAKEFILE_URL:
+        description: 'Optional: raw URL of a custom build/make/core/Makefile (leave blank for stock)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build OFR by ${{ github.actor }}
+    runs-on: ubuntu-22.04
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: write
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Validate Inputs
+      run: |
+        fail=0
+        [ -z "${{ inputs.DEVICE_TREE }}" ]        && { echo "::error::DEVICE_TREE is required."; fail=1; }
+        [ -z "${{ inputs.DEVICE_TREE_BRANCH }}" ] && { echo "::error::DEVICE_TREE_BRANCH is required."; fail=1; }
+        [ -z "${{ inputs.DEVICE_PATH }}" ]        && { echo "::error::DEVICE_PATH is required."; fail=1; }
+        [ -z "${{ inputs.DEVICE_NAME }}" ]        && { echo "::error::DEVICE_NAME is required."; fail=1; }
+        if [ "$fail" -ne 0 ]; then exit 1; fi
+        echo "All required inputs are set."
+
+    - name: Display Inputs
+      run: |
+        echo "::group::User Environment Variables"
+        echo "Manifest Branch:  ${{ inputs.MANIFEST_BRANCH }}"
+        echo "Device Tree:      ${{ inputs.DEVICE_TREE }}"
+        echo "Device Branch:    ${{ inputs.DEVICE_TREE_BRANCH }}"
+        echo "Device Path:      ${{ inputs.DEVICE_PATH }}"
+        echo "Device Name:      ${{ inputs.DEVICE_NAME }}"
+        echo "Build Target:     ${{ inputs.BUILD_TARGET }}image"
+        echo "Custom Makefile:  ${{ inputs.CUSTOM_MAKEFILE_URL }}"
+        echo "::endgroup::"
+
+    - name: Clean-up (pre-installed tools)
+      uses: rokibhasansagar/slimhub_actions@main
+
+    - name: Free up additional disk space
+      run: |
+        echo "::group::Disk before cleanup"
+        df -h /
+        echo "::endgroup::"
+        sudo rm -rf /usr/local/lib/android      || true
+        sudo rm -rf /usr/share/swift            || true
+        sudo rm -rf /usr/local/.ghcup           || true
+        sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+        sudo rm -rf /usr/local/lib/node_modules || true
+        sudo rm -rf /opt/microsoft              || true
+        sudo rm -rf /opt/az                     || true
+        sudo rm -rf /usr/local/share/edge       || true
+        sudo apt-get clean
+        echo "::group::Disk after cleanup"
+        df -h /
+        echo "::endgroup::"
+
+    - name: Swap Space
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 24
+
+    - name: Increase vm.swappiness
+      run: |
+        sudo sysctl vm.swappiness=80
+        echo "vm.swappiness is now: $(cat /proc/sys/vm/swappiness)"
+
+    # --- JDK selection: 21 for 16.0, 17 for older branches ---
+    - name: Install JDK 21 (fox_16.0)
+      if: inputs.MANIFEST_BRANCH == '16.0'
+      uses: actions/setup-java@v4
+      with:
+        distribution: zulu
+        java-version: 21
+
+    - name: Install JDK 17 (fox_14.1 / fox_12.1)
+      if: inputs.MANIFEST_BRANCH != '16.0'
+      uses: actions/setup-java@v4
+      with:
+        distribution: zulu
+        java-version: 17
+
+    - name: Verify Java
+      run: |
+        java -version
+        echo "JAVA_HOME=$JAVA_HOME"
+
+    # --- Installs repo + all build deps via OrangeFox's official script ---
+    - name: Build Environment
+      run: |
+        sudo apt install aria2 -y
+        git clone https://gitlab.com/OrangeFox/misc/scripts.git -b master
+        cd scripts
+        sudo bash setup/android_build_env.sh
+
+    # --- Shallow clone to save disk space (replaces orangefox_sync.sh) ---
+    - name: Initialize and Sync OrangeFox Sources (shallow)
+      run: |
+        FOX_BRANCH="${{ inputs.MANIFEST_BRANCH }}"
+        FOX_SRC="${GITHUB_WORKSPACE}/OrangeFox/fox_${FOX_BRANCH}"
+        mkdir -p "${FOX_SRC}"
+        cd "${FOX_SRC}"
+        git config --global user.name "${{ github.actor }}"
+        git config --global user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+
+        echo "::group::Disk before repo init"
+        df -h /
+        echo "::endgroup::"
+
+        # Shallow clone
+        repo init -u https://gitlab.com/OrangeFox/Manifest.git -b "fox_${FOX_BRANCH}" --depth=1
+
+        # -c = only current branch; --no-clone-bundle/--no-tags save extra space
+        repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
+
+        echo "::group::Disk after repo sync"
+        df -h /
+        echo "::endgroup::"
+
+    # --- OPTIONAL: Apply custom build/make/core/Makefile ---
+    - name: Apply Custom Makefile (optional)
+      if: inputs.CUSTOM_MAKEFILE_URL != ''
+      run: |
+        FOX_SRC="${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}"
+        cd "${FOX_SRC}"
+        echo "::group::Applying custom Makefile"
+        echo "URL: ${{ inputs.CUSTOM_MAKEFILE_URL }}"
+        wget -q -O build/make/core/Makefile "${{ inputs.CUSTOM_MAKEFILE_URL }}"
+        if [ ! -s build/make/core/Makefile ]; then
+          echo "::error::Custom Makefile download failed or is empty. Aborting."
+          exit 1
+        fi
+        echo "--- First 5 lines of new Makefile ---"
+        head -n 5 build/make/core/Makefile
+        echo "--- SHA256 ---"
+        sha256sum build/make/core/Makefile
+        echo "::endgroup::"
+
+    - name: Clone Device Tree
+      run: |
+        FOX_SRC="${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}"
+        cd "${FOX_SRC}"
+        git clone ${{ inputs.DEVICE_TREE }} -b ${{ inputs.DEVICE_TREE_BRANCH }} ./${{ inputs.DEVICE_PATH }}
+        cd ${{ inputs.DEVICE_PATH }}
+        echo "COMMIT_ID=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+    - name: Building OrangeFox
+      run: |
+        FOX_SRC="${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}"
+        cd "${FOX_SRC}"
+        set +e
+        source build/envsetup.sh
+        export ALLOW_MISSING_DEPENDENCIES=true
+        export FOX_BUILD_DEVICE=${{ inputs.DEVICE_NAME }}
+        export LC_ALL=C
+        set -e
+
+        # Branch-specific lunch target
+        if [ "${{ inputs.MANIFEST_BRANCH }}" = "16.0" ]; then
+          LUNCH_TARGET="twrp_${{ inputs.DEVICE_NAME }}-bp2a-eng"
+        elif [ "${{ inputs.MANIFEST_BRANCH }}" = "14.1" ]; then
+          LUNCH_TARGET="twrp_${{ inputs.DEVICE_NAME }}-ap2a-eng"
+        else
+          LUNCH_TARGET="twrp_${{ inputs.DEVICE_NAME }}-eng"
+        fi
+        echo "Using lunch target: $LUNCH_TARGET"
+
+        lunch "$LUNCH_TARGET"
+        make clean
+        mka adbd ${{ inputs.BUILD_TARGET }}image -j$(nproc --all)
+        echo "Done building OrangeFox ${{ inputs.BUILD_TARGET }}.img"
+
+    # ============================================================
+    # OPTIONAL: Verify vendor_boot contents with magiskboot
+    # Never aborts the workflow — always exits 0
+    # ============================================================
+    - name: Verify vendor_boot ramdisk size (optional)
+      continue-on-error: true
+      run: |
+        set +e
+        echo "=== Optional ramdisk verification ==="
+
+        VB_IMG="${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}/out/target/product/${{ inputs.DEVICE_NAME }}/${{ inputs.BUILD_TARGET }}.img"
+        if [ ! -f "$VB_IMG" ]; then
+          echo "::warning::Image not found at $VB_IMG — skipping verification."
+          exit 0
+        fi
+
+        echo "::group::Built image size"
+        ls -lh "$VB_IMG"
+        echo "::endgroup::"
+
+        # ---- Download Magisk APK and extract magiskboot ----
+        echo "::group::Download magiskboot"
+        cd /tmp
+        LATEST_APK=$(curl -sL --max-time 30 \
+          https://api.github.com/repos/topjohnwu/Magisk/releases/latest \
+          | grep -oP '"browser_download_url":\s*"\K[^"]*\.apk' | head -1)
+        if [ -z "$LATEST_APK" ]; then
+          echo "API failed, falling back to pinned v27.0"
+          LATEST_APK="https://github.com/topjohnwu/Magisk/releases/download/v27.0/Magisk-v27.0.apk"
+        fi
+        echo "Fetching: $LATEST_APK"
+        if ! wget -q --timeout=90 "$LATEST_APK" -O Magisk.apk; then
+          echo "::warning::Could not download Magisk APK — skipping verification."
+          exit 0
+        fi
+
+        rm -rf /tmp/magisk_ext
+        unzip -o -q Magisk.apk -d magisk_ext 2>/dev/null
+        MAGISKBOOT=$(find magisk_ext -name 'libmagiskboot.so' | head -1)
+        if [ -z "$MAGISKBOOT" ]; then
+          echo "::warning::libmagiskboot.so not found inside Magisk APK — skipping."
+          exit 0
+        fi
+        cp "$MAGISKBOOT" /tmp/magiskboot
+        chmod +x /tmp/magiskboot
+        echo "magiskboot ready at /tmp/magiskboot"
+        echo "::endgroup::"
+
+        # ---- Unpack ----
+        WORK_DIR=/tmp/vb_unpack_$$
+        mkdir -p "$WORK_DIR"
+        cd "$WORK_DIR"
+        cp "$VB_IMG" image.img
+        echo "::group::magiskboot unpack"
+        /tmp/magiskboot unpack image.img 2>&1 || echo "(magiskboot reported a non-zero exit — continuing anyway)"
+        echo "::endgroup::"
+
+        echo "::group::Extracted files — size in MB / GB"
+        printf "%-45s %14s   %12s   %12s\n" "FILE" "BYTES" "MB" "GB"
+        printf "%-45s %14s   %12s   %12s\n" "----" "-----" "--" "--"
+        for f in *; do
+          [ -f "$f" ] || continue
+          B=$(stat -c %s "$f" 2>/dev/null) || continue
+          MB=$(awk "BEGIN{printf \"%.2f\", $B/1048576}")
+          GB=$(awk "BEGIN{printf \"%.4f\", $B/1073741824}")
+          printf "%-45s %14s   %12s   %12s\n" "$f" "$B" "$MB" "$GB"
+        done
+        echo "::endgroup::"
+
+        # ---- Cross-check with unpack_bootimg if the build produced it ----
+        echo "::group::Cross-check with AOSP unpack_bootimg"
+        FOX_SRC="${GITHUB_WORKSPACE}/OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}"
+        UNPACK_BIN=$(find "${FOX_SRC}/out/host" -name 'unpack_bootimg' -type f 2>/dev/null | head -1)
+        if [ -n "$UNPACK_BIN" ]; then
+          echo "Found: $UNPACK_BIN"
+          rm -rf vb_aosp && mkdir vb_aosp
+          if "$UNPACK_BIN" --boot_img "$VB_IMG" --out vb_aosp 2>&1; then
+            echo "--- vendor_ramdisk_table.txt ---"
+            cat vb_aosp/vendor_ramdisk_table.txt 2>/dev/null || echo "(no table)"
+            echo "--- Fragment sizes ---"
+            for f in vb_aosp/*; do
+              [ -f "$f" ] || continue
+              B=$(stat -c %s "$f" 2>/dev/null) || continue
+              MB=$(awk "BEGIN{printf \"%.2f\", $B/1048576}")
+              GB=$(awk "BEGIN{printf \"%.4f\", $B/1073741824}")
+              printf "  %-40s %12s B  %10s MB  %10s GB\n" "$(basename "$f")" "$B" "$MB" "$GB"
+            done
+          else
+            echo "(unpack_bootimg failed — continuing)"
+          fi
+        else
+          echo "unpack_bootimg not present in build output — skipping cross-check."
+        fi
+        echo "::endgroup::"
+
+        # ---- Try decompressing cpio fragments so sizes can be inspected ----
+        echo "::group::Decompressed cpio fragment sizes (if LZ4/gzip)"
+        for f in *ramdisk* *.cpio* *.lz4; do
+          [ -f "$f" ] || continue
+          DECOMP="/tmp/decomp_$(basename "$f")"
+          if lz4 -d -q -f "$f" "$DECOMP" 2>/dev/null; then
+            B=$(stat -c %s "$DECOMP")
+            MB=$(awk "BEGIN{printf \"%.2f\", $B/1048576}")
+            GB=$(awk "BEGIN{printf \"%.4f\", $B/1073741824}")
+            echo "  $f -> $DECOMP  (${B} B, ${MB} MB, ${GB} GB)"
+            rm -f "$DECOMP"
+          fi
+        done
+        echo "::endgroup::"
+
+        echo "=== Verification complete (this step never fails the build) ==="
+        exit 0
+
+    - name: Set Release Properties
+      run: |
+        echo "BUILD_DATE=$(TZ=Asia/Manila date +%Y%m%d)" >> $GITHUB_ENV
+        DEVICE_TREE_URL="${{ inputs.DEVICE_TREE }}"
+        if [[ "${DEVICE_TREE_URL}" == *.git ]]; then
+          DEVICE_TREE_URL="${DEVICE_TREE_URL%.git}"
+        fi
+        echo "DEVICE_TREE_URL=${DEVICE_TREE_URL}" >> $GITHUB_ENV
+
+    - name: Upload to Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}/out/target/product/${{ inputs.DEVICE_NAME }}/OrangeFox*.img
+          OrangeFox/fox_${{ inputs.MANIFEST_BRANCH }}/out/target/product/${{ inputs.DEVICE_NAME }}/OrangeFox*.zip
+        name: OrangeFox ${{ inputs.MANIFEST_BRANCH }} for ${{ inputs.DEVICE_NAME }} // ${{ env.BUILD_DATE }}
+        tag_name: ${{ github.run_id }}
+        body: |
+          ## OrangeFox Recovery Build - Unofficial
+          Build: fox_${{ inputs.MANIFEST_BRANCH }}
+          Target: ${{ inputs.BUILD_TARGET }}.img
+          Device: [Device Tree/Branch](${{ env.DEVICE_TREE_URL }}/tree/${{ inputs.DEVICE_TREE_BRANCH }})
+          Commit: Most recent [commit](${{ env.DEVICE_TREE_URL }}/commit/${{ env.COMMIT_ID }}) during building.
